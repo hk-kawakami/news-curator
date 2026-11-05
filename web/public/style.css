@@ -127,6 +127,8 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .c-entame { background: #FCE7F3; color: #831843; }
 .c-trivia { background: #EDE9FE; color: #4C1D95; }
 .c-lifehack { background: #CCFBF1; color: #134E4A; }
+.c-travel { background: #E0F7FA; color: #155E75; }
+.c-gourmet { background: #FFEDD5; color: #7C2D12; }
 .c-science { background: #E0F2FE; color: #0C4A6E; }
 .c-sports { background: #FFE4E6; color: #881337; }
 .c-other { background: #F1F1EC; color: #44443F; }

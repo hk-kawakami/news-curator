@@ -41,7 +41,9 @@ DISCOVERY_CATEGORIES = 4        # 発見枠に使う「普段の関心から遠�
 DISCOVERY_MAX_WEIGHT = 0.5      # 分野の重みがこれ以下なら「関心から遠い」とみなす
 
 CATEGORIES = ["it", "keiba", "stock", "society", "entame", "trivia",
-              "lifehack", "science", "sports", "other"]
+              "lifehack", "travel", "gourmet", "science", "sports", "other"]
+# 関心分野として最初から重み+1で始める分野（後から追加した分野もここに書けば、次の実行で反映）
+INTEREST_CATEGORIES = ["it", "keiba", "stock", "society", "entame", "trivia", "lifehack", "travel", "gourmet"]
 
 
 def now_jst() -> datetime:
@@ -249,6 +251,9 @@ def run(db: Database, now: datetime | None = None, edition: str | None = None) -
     now = now or now_jst()
     date = now.strftime("%Y-%m-%d")
     edition = edition or edition_of(now)
+    # 関心分野の重みがまだなければ +1 で作る（既にあれば何もしない）
+    db.insert_many("weights", ["feature_type", "feature", "weight"],
+                   [("category", c, 1.0) for c in INTEREST_CATEGORIES])
     decayed = apply_daily_decay(db, date) if edition == "morning" else False
     weights = load_weights(db)
     candidates = load_candidates(db, date, edition)

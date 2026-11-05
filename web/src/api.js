@@ -7,7 +7,7 @@ const SOURCE_FACTOR = 0.5;
 const FAVORITE_DELTA = 2;
 const READ_LATER_DELTA = 1;
 const OPEN_DELTA = 0.5;
-const INITIAL_CATEGORIES = ["it", "keiba", "stock", "society", "entame", "trivia", "lifehack"];
+const INITIAL_CATEGORIES = ["it", "keiba", "stock", "society", "entame", "trivia", "lifehack", "travel", "gourmet"];
 
 const ARTICLE_COLUMNS = `
   a.id, a.url, a.title, a.publisher, a.summary, a.description, a.image_url, a.category, a.tags,

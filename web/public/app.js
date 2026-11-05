@@ -2,7 +2,7 @@
 
 const CATEGORY_LABELS = {
   it: "IT", keiba: "競馬", stock: "株", society: "社会", entame: "エンタメ", trivia: "豆知識",
-  lifehack: "ライフハック", science: "科学", sports: "スポーツ", other: "その他",
+  lifehack: "ライフハック", travel: "旅行", gourmet: "グルメ", science: "科学", sports: "スポーツ", other: "その他",
 };
 const CATEGORY_ORDER = Object.keys(CATEGORY_LABELS);
 const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
