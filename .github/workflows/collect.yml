@@ -33,6 +33,7 @@ jobs:
         run: |
           python tests/test_collect.py
           python tests/test_summarize.py
+          python tests/test_recommend.py
 
       - name: RSSを収集してD1に保存
         run: python batch/collect.py
@@ -44,3 +45,7 @@ jobs:
           # GEMINI_MODELS（例: gemini-3.5-flash-lite,gemini-3.8-flash）を登録する
           GEMINI_MODELS: ${{ vars.GEMINI_MODELS }}
         run: python batch/summarize.py
+
+      - name: 表示する記事を選ぶ（推薦）
+        if: always()
+        run: python batch/recommend.py

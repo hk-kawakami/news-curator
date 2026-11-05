@@ -1,0 +1,16 @@
+# Cloudflare Workers の設定（画面と API）
+# GitHub 連携（Workers Builds）では「ルートディレクトリ」を web にしてください。
+name = "news-curator"
+main = "src/index.js"
+compatibility_date = "2026-11-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+not_found_handling = "single-page-application"
+run_worker_first = ["/api/*"]
+
+[[d1_databases]]
+binding = "DB"
+database_name = "news-curator"
+database_id = "4e9aef7c-58c1-47a9-929e-4d74f30459ee"

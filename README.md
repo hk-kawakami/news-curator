@@ -13,7 +13,9 @@
   - 無料枠の上限（HTTP 429）に達したらその回は終了し、残りは次回に処理
   - 使えないモデル名は飛ばして次の候補で実行
 
-推薦・画面は次のステップで追加します。
+- ステップ4：推薦バッチと画面
+  - 収集・要約の後に、好みの重みで表示する記事（通常24件＋発見枠6件）を選んで `daily_picks` に保存
+  - 画面と API は Cloudflare Workers（`web/`）。GitHub と連携し、push すると自動で反映
 
 ## 構成
 
@@ -22,9 +24,14 @@ schema.sql                     D1 のテーブル定義（7テーブル＋初期
 config/sources.yaml            配信元とGoogleニュース検索キーワード
 batch/collect.py               収集バッチ本体
 batch/summarize.py             要約バッチ本体（Gemini）
+batch/recommend.py             推薦バッチ本体（表示する記事を選ぶ）
 batch/db.py                    D1（HTTP API）／ローカルSQLite への接続
+web/wrangler.toml              Workers の設定（D1 の接続先など）
+web/src/                       API（評価・あとで読む・非表示などの保存）
+web/public/                    画面（HTML / CSS / JavaScript）
 tests/test_collect.py          サンプルRSSでの動作確認（ネットワーク不要）
 tests/test_summarize.py        模擬のGemini応答での動作確認（ネットワーク不要）
+tests/test_recommend.py        推薦バッチの動作確認（ネットワーク不要）
 .github/workflows/collect.yml  毎日 6:00・18:00（日本時間）に収集
 ```
 
@@ -99,6 +106,16 @@ npx wrangler d1 execute news-curator --remote --command "SELECT category, COUNT(
 ```
 
 「使えるモデルがありません」と出たら、AI Studio で無料枠のモデル名を確認し、「Settings → Secrets and variables → Actions → Variables」に `GEMINI_MODELS`（カンマ区切り、例 `gemini-3.5-flash-lite,gemini-3.8-flash`）を登録してください。
+
+### 7. 画面を公開する（Cloudflare Workers と GitHub の連携）
+
+1. Cloudflare ダッシュボードで「Workers & Pages」→「作成」（Create）→「リポジトリをインポート」（Import a repository）を選ぶ
+2. GitHub と連携し、`news-curator` リポジトリを選ぶ
+3. プロジェクト名は `news-curator`（`web/wrangler.toml` の name と同じにする）
+4. 詳細設定で「ルートディレクトリ」（Root directory / Path）を `web` にする。ビルドコマンドは空欄、デプロイコマンドは `npx wrangler deploy` のまま
+5. 「デプロイ」を押す。完了すると `https://news-curator.<サブドメイン>.workers.dev` で開ける
+
+以降は push するたびに自動で反映されます。一覧は推薦バッチの実行後（毎日6時・18時）に更新されます。
 
 ## 運用メモ
 

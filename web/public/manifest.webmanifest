@@ -1,0 +1,9 @@
+{
+  "name": "ニュース",
+  "short_name": "ニュース",
+  "start_url": "/#today",
+  "display": "standalone",
+  "background_color": "#F6F6F3",
+  "theme_color": "#F6F6F3",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
