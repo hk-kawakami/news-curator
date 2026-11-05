@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from datetime import datetime, timedelta, timezone
@@ -25,7 +26,11 @@ PAGE_SIZE = 30                  # 画面に1回で表示する件数（「もっ
 PAGES = 3                       # 1回の実行で選んでおくページ数（30件×3＝90件）
 MAIN_SLOTS = 24 * PAGES         # 通常枠（1ページあたり24件）
 DISCOVERY_SLOTS = 6 * PAGES     # 発見枠（1ページあたり6件）
-CATEGORY_CAP = 12 * PAGES       # 1分野が通常枠に入れる上限（全体の4割）
+MAX_CATEGORY_SHARE = 0.3        # 1分野が通常枠で取れる割合の上限
+DUP_TITLE_SIMILARITY = 0.45     # 見出しの文字の重なりがこれ以上なら同じ話題とみなす
+DUP_SHORT_TITLE_SIMILARITY = 0.75  # 見出しが短いときの基準
+DUP_TAG_OVERLAP = 2             # 共通タグがこの数以上で、見出しも少し似ていれば同じ話題
+DUP_TITLE_WITH_TAGS = 0.2       #   （そのときの見出しの重なりの下限）
 CANDIDATE_HOURS = 48            # 候補にする記事の取得期間
 FRESH_HALF_LIFE_HOURS = 12      # 新しさの加点が半分になる時間
 FRESH_MAX = 1.0                 # 取得直後の新しさの加点
@@ -56,6 +61,45 @@ def parse_time(s: str | None) -> datetime | None:
 def norm_title(title: str) -> str:
     """似た見出しの重複を見分けるための正規化（記号・空白を除いた先頭30文字）。"""
     return re.sub(r"[\s\W_]+", "", title.lower())[:30]
+
+
+def bigrams(text: str) -> set[str]:
+    t = re.sub(r"[\s\W_]+", "", text.lower())
+    return {t[i:i + 2] for i in range(len(t) - 1)} or {t}
+
+
+def jaccard(a: set, b: set) -> float:
+    return len(a & b) / len(a | b) if a and b else 0.0
+
+
+def same_story(x: dict, y: dict) -> bool:
+    """別の配信元でも同じ話題の記事かどうか（見出しの文字の重なりと共通タグで判定）。"""
+    sim = jaccard(x["_bigrams"], y["_bigrams"])
+    # 短い見出し同士（「日経平均、続伸」と「日経平均、続落」など）は別の話題のことが多いので基準を厳しく
+    short = min(len(x["_bigrams"]), len(y["_bigrams"])) < 12
+    if sim >= (DUP_SHORT_TITLE_SIMILARITY if short else DUP_TITLE_SIMILARITY):
+        return True
+    return len(x["_tags"] & y["_tags"]) >= DUP_TAG_OVERLAP and sim >= DUP_TITLE_WITH_TAGS
+
+
+def category_shares(categories: list[str], weights: dict) -> dict[str, float]:
+    """関心のある分野ごとの通常枠の割合。重みには対数で緩やかに反応させ、1分野の上限も設ける。"""
+    w = {c: (weights.get(("category", c)) or {}).get("weight", 0.0) for c in categories}
+    interest = {c: v for c, v in w.items() if v > DISCOVERY_MAX_WEIGHT} or {c: 1.0 for c in categories}
+    raw = {c: 1 + math.log1p(v) for c, v in interest.items()}
+    share = {c: v / sum(raw.values()) for c, v in raw.items()}
+    for _ in range(10):  # 上限を超えた分を他の分野に配り直す
+        over = {c: v for c, v in share.items() if v > MAX_CATEGORY_SHARE}
+        if not over or len(share) * MAX_CATEGORY_SHARE < 1:
+            break
+        extra = sum(v - MAX_CATEGORY_SHARE for v in over.values())
+        rest = {c: v for c, v in share.items() if c not in over}
+        for c in over:
+            share[c] = MAX_CATEGORY_SHARE
+        total_rest = sum(rest.values())
+        for c, v in rest.items():
+            share[c] = v + extra * v / total_rest
+    return share
 
 
 def is_dup(key: str, seen: list[str]) -> bool:
@@ -131,13 +175,18 @@ def pick(candidates: list[dict], weights: dict, keywords: list[str], now_utc: da
         scored.append((score_article(a, weights, now_utc), a))
     scored.sort(key=lambda x: (-x[0], -x[1]["id"]))
 
-    # 似た見出しの重複を除く（スコアの高い方を残す）
-    unique, seen_titles = [], []
-    for s, a in scored:
+    # 同じ話題の記事を除く（スコアの高い方を残す）。比べるのは同じ分野の中だけ
+    unique, seen_titles, kept_by_cat = [], [], {}
+    for s_, a in scored:
+        a["_bigrams"] = bigrams(a["title"])
+        a["_tags"] = set(json.loads(a["tags"])) if a.get("tags") else set()
         key = norm_title(a["title"])
-        if not is_dup(key, seen_titles):
-            seen_titles.append(key)
-            unique.append((s, a))
+        same_cat = kept_by_cat.setdefault(a["category"], [])
+        if is_dup(key, seen_titles) or any(same_story(a, b) for b in same_cat):
+            continue
+        seen_titles.append(key)
+        same_cat.append(a)
+        unique.append((s_, a))
 
     # 発見枠を先に確保する: 普段の関心から遠い分野（重みが低く、評価回数の少ない分野）から、
     # 好みの重みではなく新しさと要約・画像の有無で選ぶ
@@ -151,7 +200,7 @@ def pick(candidates: list[dict], weights: dict, keywords: list[str], now_utc: da
     ranked = sorted((c for c in CATEGORIES if c in present),
                     key=lambda c: (weight(c) > DISCOVERY_MAX_WEIGHT, rated(c), weight(c), CATEGORIES.index(c)))
     far = [c for c in ranked if weight(c) <= DISCOVERY_MAX_WEIGHT]
-    low = (far if len(far) >= 2 else ranked)[:DISCOVERY_CATEGORIES]
+    low = (far or ranked)[:DISCOVERY_CATEGORIES]
     pools = {c: sorted((x for x in unique if x[1]["category"] == c),
                        key=lambda x: (bool(x[1].get("summary")), bool(x[1].get("image_url")),
                                       x[1].get("fetched_at") or ""), reverse=True) for c in low}
@@ -163,16 +212,28 @@ def pick(candidates: list[dict], weights: dict, keywords: list[str], now_utc: da
                 discovery.append((s, a, "discovery"))
     taken = {a["id"] for _, a, _ in discovery}
 
-    # 通常枠: 残りをスコア順に、1分野の上限を守って選ぶ
-    per_category: dict[str, int] = {}
+    # 通常枠: 分野ごとの枠の割合に沿って、各分野のスコア上位から順番に取る（重み付きの順番回し）
+    queues: dict[str, list] = {}
+    for s_, a in unique:
+        if a["id"] not in taken:
+            queues.setdefault(a["category"], []).append((s_, a))
+    share = category_shares(list(queues), weights)
+    current = {c: 0.0 for c in share}
     main = []
-    for s, a in unique:
-        if len(main) >= MAIN_SLOTS:
+    while len(main) < MAIN_SLOTS:
+        active = [c for c in share if queues.get(c)]
+        if not active:
+            # 関心分野の記事が尽きたら、残りの分野からスコア順に埋める
+            rest = sorted((x for c, q in queues.items() if c not in share for x in q), key=lambda x: -x[0])
+            main.extend((s_, a, "main") for s_, a in rest[:MAIN_SLOTS - len(main)])
             break
-        if a["id"] in taken or per_category.get(a["category"], 0) >= CATEGORY_CAP:
-            continue
-        per_category[a["category"]] = per_category.get(a["category"], 0) + 1
-        main.append((s, a, "main"))
+        total = sum(share[c] for c in active)
+        for c in active:
+            current[c] += share[c]
+        c = max(active, key=lambda c: current[c])
+        current[c] -= total
+        s_, a = queues[c].pop(0)
+        main.append((s_, a, "main"))
 
     # 発見枠は通常枠4件ごとに1件ずつ差し込む（まとめて末尾に置かない）
     ordered, d = [], list(discovery)
