@@ -138,6 +138,43 @@ def main():
     report = summarize.run(db, "key", ["m"], sleep=lambda s: None)
     check(report["summarized"] == 5 and report["skipped"] == 20, "壊れた応答のまとまりは次回に回し、残りは要約")
 
+    # --- 503（混雑）: 待って再試行すれば成功
+    db = new_db(5)
+    waits, state = [], {"n": 0}
+
+    def fake_503_then_ok(url, payload, api_key):
+        state["n"] += 1
+        if state["n"] <= 2:
+            return FakeResponse(503, {"error": {"status": "UNAVAILABLE"}})
+        items = json.loads(payload["contents"][0]["parts"][0]["text"].split("記事一覧（JSON）:\n")[1])
+        return gemini_ok([{"id": it["id"], "summary": "要約", "category": "it", "tags": []} for it in items])
+
+    summarize.http_post = fake_503_then_ok
+    report = summarize.run(db, "key", ["m"], sleep=waits.append)
+    check(report["summarized"] == 5 and waits == summarize.OVERLOAD_WAITS, "503は待って再試行し、空いたら要約する")
+
+    # --- 503 が続くモデルは次のモデルに切り替える
+    db = new_db(5)
+    used = []
+
+    def fake_503_model(url, payload, api_key):
+        used.append(url.split("/models/")[1].split(":")[0])
+        if "busy" in url:
+            return FakeResponse(503, {"error": {"status": "UNAVAILABLE"}})
+        items = json.loads(payload["contents"][0]["parts"][0]["text"].split("記事一覧（JSON）:\n")[1])
+        return gemini_ok([{"id": it["id"], "summary": "要約", "category": "it", "tags": []} for it in items])
+
+    summarize.http_post = fake_503_model
+    report = summarize.run(db, "key", ["busy", "free"], sleep=lambda s: None)
+    check(report["summarized"] == 5 and report["model"] == "free", "混雑が続くモデルから別のモデルに切り替えて要約")
+
+    # --- 全モデルが混雑し続けたら、決められたまとまり数で打ち切る
+    db = new_db(100)
+    summarize.http_post = lambda url, payload, api_key: FakeResponse(503, {"error": {"status": "UNAVAILABLE"}})
+    report = summarize.run(db, "key", ["a", "b"], sleep=lambda s: None)
+    check(report["overloaded"] == summarize.MAX_OVERLOADED_BATCHES and report["skipped"] == 100
+          and report.get("rate_limited"), "全モデルが混雑し続けたら3まとまりで打ち切り、残りは次回へ（エラー扱いにしない）")
+
     print(f"\n{'すべて成功' if not check.failed else f'{check.failed} 件失敗'}")
     sys.exit(1 if check.failed else 0)
 

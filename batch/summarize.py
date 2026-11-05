@@ -31,6 +31,8 @@ TARGET_DAYS = 3              # この日数以内に取得した記事だけを�
 REQUEST_INTERVAL = 5.0       # リクエスト間隔（秒）。無料枠の1分あたり上限に収める
 RATE_LIMIT_WAIT = 60         # 429 のときに待つ秒数
 MAX_RATE_LIMIT_RETRIES = 2   # 429 が続いたらその回は終了（1日の上限の可能性）
+OVERLOAD_WAITS = [15, 30]    # 503（混雑）のときに待つ秒数。使い切ったら次のモデルへ
+MAX_OVERLOADED_BATCHES = 3   # 全モデルが混雑したまとまりがこの数続いたら、その回は終了
 DESCRIPTION_MAX = 200
 
 CATEGORIES = {
@@ -80,6 +82,10 @@ class ModelUnavailable(Exception):
     pass
 
 
+class Overloaded(Exception):
+    """Gemini 側の一時的な混雑（500 / 503）。"""
+
+
 def http_post(url: str, payload: dict, api_key: str) -> requests.Response:
     """Gemini API を呼ぶ（テストでは差し替える）。"""
     return requests.post(url, json=payload, timeout=90,
@@ -104,6 +110,8 @@ def call_gemini(model: str, api_key: str, articles: list[dict]) -> list[dict]:
     res = http_post(API_URL.format(model=model), build_payload(articles), api_key)
     if res.status_code == 429:
         raise RateLimited(res.text[:300])
+    if res.status_code in (500, 503):
+        raise Overloaded(f"{model}: HTTP {res.status_code}")
     if res.status_code in (400, 403, 404) and ("model" in res.text.lower() or res.status_code == 404):
         raise ModelUnavailable(f"{model}: HTTP {res.status_code} {res.text[:200]}")
     if res.status_code != 200:
@@ -142,13 +150,15 @@ def run(db: Database, api_key: str, models: list[str] | None = None,
     models = list(models or DEFAULT_MODELS)
     articles = pending_articles(db, MAX_ARTICLES_PER_RUN)
     report = {"pending": len(articles), "summarized": 0, "skipped": 0, "requests": 0,
-              "model": None, "stopped": None}
+              "model": None, "stopped": None, "overloaded": 0}
+    overloaded_in_row = 0
 
     for i in range(0, len(articles), BATCH_SIZE):
         batch = articles[i:i + BATCH_SIZE]
         if i:
             sleep(REQUEST_INTERVAL)
-        results, retries = None, 0
+        results, retries, overload_waits, models_tried = None, 0, 0, 1
+        batch_overloaded = False
         while results is None:
             if not models:
                 report["stopped"] = "使えるモデルがありません（GEMINI_MODELS を確認してください）"
@@ -160,6 +170,20 @@ def run(db: Database, api_key: str, models: list[str] | None = None,
             except ModelUnavailable as e:
                 print(f"モデルを切り替えます: {e}")
                 models.pop(0)
+            except Overloaded as e:
+                if overload_waits < len(OVERLOAD_WAITS):
+                    sleep(OVERLOAD_WAITS[overload_waits])
+                    overload_waits += 1
+                elif models_tried < len(models):
+                    # 混雑中のモデルを後ろに回し、次のモデルで試す
+                    print(f"混雑のため次のモデルで試します: {e}")
+                    models.append(models.pop(0))
+                    overload_waits, models_tried = 0, models_tried + 1
+                else:
+                    print(f"全モデルが混雑しているため、このまとまりは次回に回します: {e}")
+                    report["overloaded"] += 1
+                    batch_overloaded = True
+                    results = []
             except RateLimited as e:
                 retries += 1
                 if retries > MAX_RATE_LIMIT_RETRIES:
@@ -181,6 +205,13 @@ def run(db: Database, api_key: str, models: list[str] | None = None,
                      [*cleaned, a["id"]])
             report["summarized"] += 1
         report["skipped"] += len(by_id)  # 応答に含まれなかった記事は次回に再挑戦
+
+        overloaded_in_row = overloaded_in_row + 1 if batch_overloaded else 0
+        if overloaded_in_row >= MAX_OVERLOADED_BATCHES:
+            report["skipped"] += len(articles) - (i + len(batch))
+            report["stopped"] = "Gemini が混雑しているため終了（残りは次回）"
+            report["rate_limited"] = True
+            return report
     return report
 
 
