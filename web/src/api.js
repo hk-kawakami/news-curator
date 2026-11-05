@@ -65,32 +65,55 @@ async function ensureState(db, id) {
 
 // ---------------------------------------------------------------- 各API
 
+const PAGE_SIZE = 30;
+
 async function feed(db, url) {
   const editions = (await db.prepare(
     `SELECT date, edition, COUNT(*) AS n FROM daily_picks
      GROUP BY date, edition ORDER BY date DESC, edition DESC LIMIT 14`).all()).results;
-  if (!editions.length) return { date: null, edition: null, editions: [], items: [] };
+  if (!editions.length) return { date: null, edition: null, editions: [], items: [], next: null };
   const date = url.searchParams.get("date") || editions[0].date;
   const edition = url.searchParams.get("edition") || editions.find((e) => e.date === date)?.edition || editions[0].edition;
-  const rows = (await db.prepare(
-    `SELECT ${ARTICLE_COLUMNS}, p.slot, p.rank, p.score FROM daily_picks p
-     JOIN articles a ON a.id = p.article_id ${ARTICLE_JOINS}
-     WHERE p.date = ? AND p.edition = ?
-       AND COALESCE(a.publisher, '') NOT IN (SELECT value FROM mutes WHERE type = 'source')
-     ORDER BY p.rank`).bind(date, edition).all()).results;
+  const after = Number(url.searchParams.get("after") || 0);  // 「もっと見る」: この順位より後を返す
   const keywords = (await db.prepare("SELECT value FROM mutes WHERE type = 'keyword'").all()).results
     .map((r) => r.value.toLowerCase());
-  const items = rows.map(toItem).filter((it) => {
+  const keep = (it) => {
     const text = [it.title, it.summary || "", ...it.tags].join(" ").toLowerCase();
     return !keywords.some((k) => text.includes(k));
-  });
-  return { date, edition, editions, items };
+  };
+  // 評価済み・非表示を除いたあと PAGE_SIZE 件になるまで順位順に読む
+  const items = [];
+  let cursor = after, done = false;
+  while (items.length < PAGE_SIZE && !done) {
+    const rows = (await db.prepare(
+      `SELECT ${ARTICLE_COLUMNS}, p.slot, p.rank, p.score FROM daily_picks p
+       JOIN articles a ON a.id = p.article_id ${ARTICLE_JOINS}
+       WHERE p.date = ? AND p.edition = ? AND p.rank > ?
+         AND r.rating IS NULL
+         AND COALESCE(a.publisher, '') NOT IN (SELECT value FROM mutes WHERE type = 'source')
+       ORDER BY p.rank LIMIT ?`).bind(date, edition, cursor, PAGE_SIZE).all()).results;
+    if (rows.length < PAGE_SIZE) done = true;
+    if (rows.length) cursor = rows[rows.length - 1].rank;
+    for (const it of rows.map(toItem).filter(keep)) if (items.length < PAGE_SIZE) items.push(it);
+  }
+  const lastRank = items.length ? items[items.length - 1].rank : cursor;
+  const rest = await db.prepare(
+    `SELECT COUNT(*) AS n FROM daily_picks p LEFT JOIN ratings r ON r.article_id = p.article_id
+     WHERE p.date = ? AND p.edition = ? AND p.rank > ? AND r.rating IS NULL`).bind(date, edition, lastRank).first();
+  return { date, edition, editions, items, next: rest.n > 0 ? lastRank : null };
 }
 
 async function list(db, url) {
   const type = url.searchParams.get("type");
+  if (type === "rated") {
+    // 評価済みの記事（評価した日時の新しい順）
+    const rows = (await db.prepare(
+      `SELECT ${ARTICLE_COLUMNS}, r.rated_at FROM articles a ${ARTICLE_JOINS}
+       WHERE r.rating IS NOT NULL ORDER BY r.rated_at DESC LIMIT 300`).all()).results;
+    return { items: rows.map(toItem) };
+  }
   const column = { later: "read_later", favorite: "favorite" }[type];
-  if (!column) throw new HttpError(400, "type は later か favorite を指定してください");
+  if (!column) throw new HttpError(400, "type は later・favorite・rated のいずれかです");
   const rows = (await db.prepare(
     `SELECT ${ARTICLE_COLUMNS} FROM articles a ${ARTICLE_JOINS}
      WHERE s.${column} = 1 ORDER BY a.fetched_at DESC LIMIT 200`).all()).results;
@@ -99,9 +122,18 @@ async function list(db, url) {
 
 async function rate(db, body) {
   const id = Number(body.id), rating = Number(body.rating);
-  if (!RATING_DELTA.hasOwnProperty(rating)) throw new HttpError(400, "rating は1〜5です");
+  if (rating !== 0 && !RATING_DELTA.hasOwnProperty(rating)) throw new HttpError(400, "rating は1〜5（取り消しは0）です");
   const article = await getArticle(db, id);
   const old = await db.prepare("SELECT rating FROM ratings WHERE article_id = ?").bind(id).first();
+  if (rating === 0) {
+    // 評価の取り消し: 評価を消し、重みと評価回数を元に戻す
+    if (!old) return { id, rating: null };
+    await db.batch([
+      db.prepare("DELETE FROM ratings WHERE article_id = ?").bind(id),
+      ...weightStatements(db, article, -RATING_DELTA[old.rating], -1),
+    ]);
+    return { id, rating: null };
+  }
   const delta = RATING_DELTA[rating] - (old ? RATING_DELTA[old.rating] : 0);
   await db.batch([
     db.prepare(`INSERT INTO ratings (article_id, rating, rated_at) VALUES (?, ?, datetime('now'))

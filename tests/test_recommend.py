@@ -53,38 +53,40 @@ def main():
     date = now.strftime("%Y-%m-%d")
 
     db = new_db()
-    for i in range(30):
+    for i in range(100):
         add(db, i, "it")
-    for i in range(10):
+    for i in range(40):
         add(db, i, "keiba")
     for c in ["science", "sports", "trivia", "entame", "other"]:
-        for i in range(3):
+        for i in range(10):
             add(db, i, c)
-    add(db, 99, "it", hours_ago=60)                      # 48時間より古い
-    rated = add(db, 98, "it", title="評価済みの記事")
+    add(db, 999, "it", hours_ago=60)                      # 48時間より古い
+    rated = add(db, 998, "it", title="評価済みの記事")
     db.query("INSERT INTO ratings (article_id, rating) VALUES (?, 4)", [rated])
-    muted_src = add(db, 97, "it", title="非表示媒体の記事", publisher="非表示媒体")
+    muted_src = add(db, 997, "it", title="非表示媒体の記事", publisher="非表示媒体")
     db.query("INSERT INTO mutes (type, value) VALUES ('source', '非表示媒体')")
-    add(db, 96, "it", title="ミュート語を含む記事", tags=["ガチャ"])
+    add(db, 996, "it", title="ミュート語を含む記事", tags=["ガチャ"])
     db.query("INSERT INTO mutes (type, value) VALUES ('keyword', 'ガチャ')")
-    add(db, 95, "keiba", title="天皇賞の結果 - 速報")
-    add(db, 94, "keiba", title="天皇賞の結果 - 速報（別媒体）", publisher="媒体B")
+    add(db, 995, "keiba", title="天皇賞の結果 - 速報")
+    add(db, 994, "keiba", title="天皇賞の結果 - 速報（別媒体）", publisher="媒体B")
 
     r = recommend.run(db, now=now)
     print(r)
     p = picks(db, date, "morning")
     titles = [x["title"] for x in p]
-    check(r["edition"] == "morning" and len(p) == 30, "朝の回として30件を選ぶ")
-    check(sum(1 for x in p if x["slot"] == "discovery") == 6, "うち発見枠は6件")
+    page1 = [x for x in p if x["rank"] <= 30]
+    check(r["edition"] == "morning" and len(p) == 90, "朝の回として90件（30件×3ページ）を選ぶ")
+    check(sum(1 for x in page1 if x["slot"] == "discovery") == 6, "1ページ目30件のうち発見枠は6件")
+    check(sum(1 for x in p if x["slot"] == "discovery") == 18, "全体では発見枠18件")
     check(max(sum(1 for x in p if x["category"] == c and x["slot"] == "main") for c in recommend.CATEGORIES) <= recommend.CATEGORY_CAP,
-          "通常枠で1分野が12件を超えない")
+          "通常枠で1分野が上限（全体の4割）を超えない")
     check("評価済みの記事" not in titles and "非表示媒体の記事" not in titles, "評価済み・非表示媒体の記事は出さない")
     check("ミュート語を含む記事" not in titles, "非表示キーワードを含む記事は出さない")
     check(sum(1 for t in titles if t.startswith("天皇賞の結果")) == 1, "似た見出しの重複は1件だけ")
-    check(not any("記事99" in t for t in titles), "48時間より古い記事は出さない")
+    check(not any("記事999" in t for t in titles), "48時間より古い記事は出さない")
     check(p[4]["slot"] == "discovery", "発見枠は通常枠4件ごとに差し込む")
     disc_cats = {x["category"] for x in p if x["slot"] == "discovery"}
-    check("it" not in disc_cats and "keiba" not in disc_cats, "発見枠は評価の少ない分野から選ぶ")
+    check(disc_cats == {"science", "sports", "other"}, f"発見枠は関心分野以外（科学・スポーツ・その他）から選ぶ: {disc_cats}")
 
     # 好みの重みが効く: keiba の重みを上げると keiba が上位に来る
     db.query("INSERT INTO weights (feature_type, feature, weight, rated_count) VALUES ('category', 'keiba', 5, 3) "
@@ -92,19 +94,22 @@ def main():
     r = recommend.run(db, now=now)  # 同じ回をやり直し
     p = picks(db, date, "morning")
     check(p[0]["category"] == "keiba", "重みの高い分野が上位に来る")
-    check(len(p) == 30, "同じ回をやり直しても件数は同じ（前の結果は置き換え）")
+    check(len(p) == 90, "同じ回をやり直しても件数は同じ（前の結果は置き換え）")
     check(r["decayed"] is False, "減衰は1日1回だけ")
     w = db.query("SELECT weight FROM weights WHERE feature_type='category' AND feature='it'")[0]["weight"]
     check(abs(w - 0.98) < 1e-9, "朝の回で重みを0.98倍に減衰")
 
     # 夕方の回: 朝に出した記事は出さない
     evening = now.replace(hour=18)
-    shown = {x["article_id"] for x in p}
+    shown = {x["article_id"] for x in p if x["rank"] <= 30}
+    later_pages = {x["article_id"] for x in p if x["rank"] > 30}
     for i in range(5):
         add(db, 200 + i, "it", hours_ago=0)
     r = recommend.run(db, now=evening)
     pe = picks(db, date, "evening")
-    check(r["edition"] == "evening" and not (shown & {x["article_id"] for x in pe}), "夕方の回は朝に出した記事を除く")
+    ids_e = {x["article_id"] for x in pe}
+    check(r["edition"] == "evening" and not (shown & ids_e), "夕方の回は、朝の1ページ目に出した記事を除く")
+    check(bool(later_pages & ids_e), "朝の2ページ目以降（見ていないかもしれない記事）は夕方の候補に残す")
     check(r["decayed"] is False, "夕方の回では減衰しない")
 
     # タグ・配信元の重み

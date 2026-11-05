@@ -70,7 +70,7 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .loading { text-align: center; color: var(--ink-3); padding: 48px; font-size: 14px; }
 
 /* 下部タブ */
-.tabs { position: fixed; left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
+.tabs { position: fixed; left: 0; right: 0; bottom: 0; display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
   border-top: 1px solid var(--line); background: rgba(255,255,255,.96); backdrop-filter: blur(8px);
   padding: 6px 0 calc(10px + env(safe-area-inset-bottom)); z-index: 5; }
 .tabs a { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 2px;
@@ -131,3 +131,12 @@ svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width:
 .c-sports { background: #FFE4E6; color: #881337; }
 .c-other { background: #F1F1EC; color: #44443F; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.card { transition: opacity .25s, transform .25s; }
+.card.leaving { opacity: 0; transform: translateX(24px); }
+.toast { display: flex; align-items: center; gap: 12px; }
+.toast-action { background: none; border: 0; color: #93C5FD; font-weight: 700; font-size: 13px; padding: 6px 4px; min-height: 36px; cursor: pointer; }
+.toast { white-space: nowrap; }
+.more-btn { min-height: 48px; margin: 6px 0 4px; border-radius: 12px; border: 1px solid var(--line-2); background: var(--card);
+  font-size: 14px; font-weight: 700; color: var(--accent); cursor: pointer; }
+.more-btn:disabled { color: var(--ink-3); cursor: default; }
+.end-note { text-align: center; font-size: 12px; color: var(--ink-3); margin: 8px 0; }

@@ -7,7 +7,7 @@ const CATEGORY_LABELS = {
 const CATEGORY_ORDER = Object.keys(CATEGORY_LABELS);
 const WEEKDAYS = ["日", "月", "火", "水", "木", "金", "土"];
 
-const state = { tab: "today", feed: null, list: [], filter: "all", sheetItem: null, edition: null };
+const state = { tab: "today", feed: null, list: [], filter: "all", starFilter: "all", sheetItem: null, edition: null, loadingMore: false };
 const $ = (id) => document.getElementById(id);
 
 // ---------------------------------------------------------------- 共通
@@ -25,12 +25,20 @@ async function api(path, body) {
 }
 
 let toastTimer;
-function toast(msg) {
+function toast(msg, actionLabel, onAction) {
   const el = $("toast");
   el.textContent = msg;
+  if (actionLabel) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "toast-action";
+    b.textContent = actionLabel;
+    b.addEventListener("click", () => { el.hidden = true; onAction(); });
+    el.append(b);
+  }
   el.hidden = false;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.hidden = true; }, 2400);
+  toastTimer = setTimeout(() => { el.hidden = true; }, actionLabel ? 5000 : 2400);
 }
 
 // D1 の時刻（UTC "YYYY-MM-DD HH:MM:SS"）を日本時間の短い表記に
@@ -118,13 +126,22 @@ function renderHeader() {
         <select class="edition-select" id="edition-select" aria-label="表示する回">${options}</select></label>` : "まだ一覧がありません"}</p>
       <h1>今日のニュース</h1>`;
   } else {
-    const titles = { later: "あとで読む", favorite: "お気に入り", settings: "設定" };
+    const titles = { later: "あとで読む", favorite: "お気に入り", rated: "評価済み", settings: "設定" };
     top.innerHTML = `<h1>${titles[state.tab]}</h1>`;
   }
 }
 
 function renderChips() {
   const chips = $("chips");
+  if (state.tab === "rated" && state.list.length) {
+    const present = new Set(state.list.map((it) => it.rating));
+    const stars = ["all", ...[5, 4, 3, 2, 1].filter((n) => present.has(n)).map(String)];
+    if (!stars.includes(state.starFilter)) state.starFilter = "all";
+    chips.hidden = false;
+    chips.innerHTML = stars.map((n) =>
+      `<button type="button" class="chip" data-star="${n}" aria-pressed="${state.starFilter === n}">${n === "all" ? "すべて" : "★" + n}</button>`).join("");
+    return;
+  }
   if (state.tab !== "today" || !state.feed?.items?.length) { chips.hidden = true; return; }
   const present = new Set(state.feed.items.map((it) => it.category));
   const cats = ["all", ...CATEGORY_ORDER.filter((c) => present.has(c))];
@@ -135,13 +152,23 @@ function renderChips() {
 }
 
 function renderList() {
-  const items = currentItems().filter((it) => state.tab !== "today" || state.filter === "all" || it.category === state.filter);
+  const items = currentItems().filter((it) =>
+    state.tab === "today" ? state.filter === "all" || it.category === state.filter
+    : state.tab === "rated" ? state.starFilter === "all" || it.rating === Number(state.starFilter)
+    : true);
   const empty = {
     today: "まだ表示できるニュースがありません。<br>朝6時・夕方18時の収集後に表示されます。",
     later: "「あとで読む」に入れた記事はまだありません。",
     favorite: "お気に入りに入れた記事はまだありません。",
+    rated: "評価した記事はまだありません。",
   };
-  $("main").innerHTML = items.length ? items.map(cardHtml).join("") : `<p class="empty">${empty[state.tab]}</p>`;
+  let html = items.length ? items.map(cardHtml).join("") : `<p class="empty">${empty[state.tab]}</p>`;
+  if (state.tab === "today" && state.feed?.items?.length) {
+    html += state.feed.next != null
+      ? `<button type="button" class="more-btn" data-action="more"${state.loadingMore ? " disabled" : ""}>${state.loadingMore ? "読み込み中…" : "もっと見る"}</button>`
+      : `<p class="end-note">この回のニュースはここまでです</p>`;
+  }
+  $("main").innerHTML = html;
 }
 
 function weightPills(rows, low) {
@@ -182,7 +209,7 @@ async function render() {
     if (state.tab === "today") {
       const q = state.edition ? `?date=${state.edition.date}&edition=${state.edition.edition}` : "";
       state.feed = await api(`/feed${q}`);
-    } else if (state.tab === "later" || state.tab === "favorite") {
+    } else if (state.tab === "later" || state.tab === "favorite" || state.tab === "rated") {
       state.list = (await api(`/list?type=${state.tab}`)).items;
     }
     renderHeader();
@@ -217,6 +244,50 @@ function openSheet(item) {
 }
 function closeSheet() { $("sheet").hidden = true; state.sheetItem = null; }
 
+// 「もっと見る」: 同じ回の次の30件を読み足す
+async function loadMore() {
+  const f = state.feed;
+  if (!f || f.next == null || state.loadingMore) return;
+  state.loadingMore = true;
+  renderList();
+  try {
+    const more = await api(`/feed?date=${f.date}&edition=${f.edition}&after=${f.next}`);
+    const known = new Set(f.items.map((it) => it.id));
+    f.items.push(...more.items.filter((it) => !known.has(it.id)));
+    f.next = more.next;
+  } catch (e) {
+    toast(`読み込めませんでした: ${e.message}`);
+  }
+  state.loadingMore = false;
+  renderChips();
+  renderList();
+}
+
+// 評価した記事は少し後に「今日」の一覧から外す（取り消しボタン付き）
+const hideTimers = new Map();
+function hideRatedLater(item, n) {
+  clearTimeout(hideTimers.get(item.id));
+  hideTimers.set(item.id, setTimeout(() => {
+    const items = state.feed?.items || [];
+    const index = items.indexOf(item);
+    if (index < 0 || !item.rating) return;
+    const card = document.querySelector(`.card[data-id="${item.id}"]`);
+    const remove = () => {
+      items.splice(items.indexOf(item), 1);
+      renderChips();
+      renderList();
+    };
+    if (card) { card.classList.add("leaving"); setTimeout(remove, 250); } else remove();
+    toast(`★${n}で評価しました`, "取り消す", () => {
+      item.rating = null;
+      items.splice(Math.min(index, items.length), 0, item);
+      renderChips();
+      renderList();
+      act(() => api("/rate", { id: item.id, rating: 0 }));
+    });
+  }, 900));
+}
+
 function removeWhere(pred) {
   if (state.feed) state.feed.items = state.feed.items.filter((it) => !pred(it));
   state.list = state.list.filter((it) => !pred(it));
@@ -236,11 +307,16 @@ $("main").addEventListener("click", (ev) => {
     api("/open", { id }).catch(() => {});
     return;
   }
+  if (action === "more") {
+    loadMore();
+    return;
+  }
   if (action === "rate" && item) {
     const n = Number(el.dataset.n), old = item.rating;
     item.rating = n;
     renderList();
     act(() => api("/rate", { id, rating: n }), () => { item.rating = old; });
+    if (state.tab === "today") hideRatedLater(item, n);
   } else if ((action === "later" || action === "fav") && item) {
     const field = action === "later" ? "read_later" : "favorite";
     item[field] = !item[field];
@@ -268,6 +344,13 @@ $("main").addEventListener("error", (ev) => {
 }, true);
 
 $("chips").addEventListener("click", (ev) => {
+  const star = ev.target.closest("[data-star]");
+  if (star) {
+    state.starFilter = star.dataset.star;
+    renderChips();
+    renderList();
+    return;
+  }
   const b = ev.target.closest("[data-filter]");
   if (!b) return;
   state.filter = b.dataset.filter;
@@ -326,8 +409,9 @@ $("sheet-tags").addEventListener("click", (ev) => {
 
 function route() {
   const tab = (location.hash || "#today").slice(1);
-  state.tab = ["today", "later", "favorite", "settings"].includes(tab) ? tab : "today";
+  state.tab = ["today", "later", "favorite", "rated", "settings"].includes(tab) ? tab : "today";
   window.scrollTo(0, 0);
+  $("toast").hidden = true;
   render();
 }
 window.addEventListener("hashchange", route);

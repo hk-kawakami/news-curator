@@ -21,16 +21,19 @@ from db import Database, connect  # noqa: E402
 
 JST = timezone(timedelta(hours=9))
 
-MAIN_SLOTS = 24                 # 通常枠
-DISCOVERY_SLOTS = 6             # 発見枠
-CATEGORY_CAP = 12               # 1分野が通常枠に入れる上限（全体30件の4割）
+PAGE_SIZE = 30                  # 画面に1回で表示する件数（「もっと見る」で次の30件）
+PAGES = 3                       # 1回の実行で選んでおくページ数（30件×3＝90件）
+MAIN_SLOTS = 24 * PAGES         # 通常枠（1ページあたり24件）
+DISCOVERY_SLOTS = 6 * PAGES     # 発見枠（1ページあたり6件）
+CATEGORY_CAP = 12 * PAGES       # 1分野が通常枠に入れる上限（全体の4割）
 CANDIDATE_HOURS = 48            # 候補にする記事の取得期間
 FRESH_HALF_LIFE_HOURS = 12      # 新しさの加点が半分になる時間
 FRESH_MAX = 1.0                 # 取得直後の新しさの加点
 TAG_FACTOR = 0.5
 SOURCE_FACTOR = 0.5
 DAILY_DECAY = 0.98              # 1日1回（朝の回）、すべての重みに掛ける
-DISCOVERY_CATEGORIES = 4        # 発見枠に使う「評価の少ない分野」の数
+DISCOVERY_CATEGORIES = 4        # 発見枠に使う「普段の関心から遠い分野」の数
+DISCOVERY_MAX_WEIGHT = 0.5      # 分野の重みがこれ以下なら「関心から遠い」とみなす
 
 CATEGORIES = ["it", "keiba", "stock", "society", "entame", "trivia",
               "lifehack", "science", "sports", "other"]
@@ -82,11 +85,13 @@ def apply_daily_decay(db: Database, today: str) -> bool:
 
 
 def load_candidates(db: Database, date: str, edition: str) -> list[dict]:
+    # 以前の回で1ページ目（必ず表示される30件）に入った記事は除く。
+    # 2ページ目以降は見ていない可能性があるので、次の回の候補に残す。
     return db.query(f"""
       SELECT a.* FROM articles a
       WHERE a.fetched_at >= datetime('now', '-{CANDIDATE_HOURS} hours')
         AND a.id NOT IN (SELECT article_id FROM daily_picks
-                         WHERE NOT (date = ? AND edition = ?))
+                         WHERE rank <= {PAGE_SIZE} AND NOT (date = ? AND edition = ?))
         AND a.id NOT IN (SELECT article_id FROM ratings)
         AND a.id NOT IN (SELECT article_id FROM article_states WHERE is_read = 1 OR opened_at IS NOT NULL)
         AND COALESCE(a.publisher, '') NOT IN (SELECT value FROM mutes WHERE type = 'source')
@@ -126,51 +131,48 @@ def pick(candidates: list[dict], weights: dict, keywords: list[str], now_utc: da
         scored.append((score_article(a, weights, now_utc), a))
     scored.sort(key=lambda x: (-x[0], -x[1]["id"]))
 
-    seen_titles: list[str] = []
-    per_category: dict[str, int] = {}
-    main, rest = [], []
+    # 似た見出しの重複を除く（スコアの高い方を残す）
+    unique, seen_titles = [], []
     for s, a in scored:
         key = norm_title(a["title"])
-        if is_dup(key, seen_titles):
-            continue
-        if len(main) < MAIN_SLOTS and per_category.get(a["category"], 0) < CATEGORY_CAP:
+        if not is_dup(key, seen_titles):
             seen_titles.append(key)
-            per_category[a["category"]] = per_category.get(a["category"], 0) + 1
-            main.append((s, a, "main"))
-        else:
-            rest.append((s, a))
+            unique.append((s, a))
 
-    # 発見枠: 評価回数の少ない分野から、新しく要約のある記事を順番に1件ずつ
-    # （通常枠に出ていない分野を優先し、評価回数が同じなら重みの低い＝普段の関心から遠い分野を優先）
+    # 発見枠を先に確保する: 普段の関心から遠い分野（重みが低く、評価回数の少ない分野）から、
+    # 好みの重みではなく新しさと要約・画像の有無で選ぶ
     def rated(c):
         return (weights.get(("category", c)) or {}).get("rated_count", 0)
 
     def weight(c):
         return (weights.get(("category", c)) or {}).get("weight", 0.0)
 
-    present = {a["category"] for _, a in rest}
-    in_main = {a["category"] for _, a, _ in main}
-    low = sorted((c for c in CATEGORIES if c in present),
-                 key=lambda c: (c in in_main, rated(c), weight(c), CATEGORIES.index(c)))
-    outside = [c for c in low if c not in in_main]
-    # 通常枠に出ていない分野が2つ以上あれば、それだけで発見枠を作る
-    low = (outside if len(outside) >= 2 else low)[:DISCOVERY_CATEGORIES]
-    pools = {c: [x for x in rest if x[1]["category"] == c] for c in low}
-    for c in pools:  # 発見枠は好みの重みではなく、新しさと要約・画像の有無で選ぶ
-        pools[c].sort(key=lambda x: (bool(x[1].get("summary")), bool(x[1].get("image_url")),
-                                     x[1].get("fetched_at") or ""), reverse=True)
+    present = {a["category"] for _, a in unique}
+    ranked = sorted((c for c in CATEGORIES if c in present),
+                    key=lambda c: (weight(c) > DISCOVERY_MAX_WEIGHT, rated(c), weight(c), CATEGORIES.index(c)))
+    far = [c for c in ranked if weight(c) <= DISCOVERY_MAX_WEIGHT]
+    low = (far if len(far) >= 2 else ranked)[:DISCOVERY_CATEGORIES]
+    pools = {c: sorted((x for x in unique if x[1]["category"] == c),
+                       key=lambda x: (bool(x[1].get("summary")), bool(x[1].get("image_url")),
+                                      x[1].get("fetched_at") or ""), reverse=True) for c in low}
     discovery = []
     while len(discovery) < DISCOVERY_SLOTS and any(pools.values()):
         for c in low:
-            while pools[c]:
+            if pools[c] and len(discovery) < DISCOVERY_SLOTS:
                 s, a = pools[c].pop(0)
-                key = norm_title(a["title"])
-                if not is_dup(key, seen_titles):
-                    seen_titles.append(key)
-                    discovery.append((s, a, "discovery"))
-                    break
-            if len(discovery) >= DISCOVERY_SLOTS:
-                break
+                discovery.append((s, a, "discovery"))
+    taken = {a["id"] for _, a, _ in discovery}
+
+    # 通常枠: 残りをスコア順に、1分野の上限を守って選ぶ
+    per_category: dict[str, int] = {}
+    main = []
+    for s, a in unique:
+        if len(main) >= MAIN_SLOTS:
+            break
+        if a["id"] in taken or per_category.get(a["category"], 0) >= CATEGORY_CAP:
+            continue
+        per_category[a["category"]] = per_category.get(a["category"], 0) + 1
+        main.append((s, a, "main"))
 
     # 発見枠は通常枠4件ごとに1件ずつ差し込む（まとめて末尾に置かない）
     ordered, d = [], list(discovery)
