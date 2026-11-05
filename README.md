@@ -2,13 +2,18 @@
 
 自分用のニュース管理サイト。毎日2回（6時・18時）RSSを集めて Cloudflare D1 に保存し、評価から好みを学習して並べ替える。
 
-このリポジトリでできていること（ステップ2：収集バッチ）
+このリポジトリでできていること
 
-- `config/sources.yaml` の配信元（RSS 15件＋Googleニュース検索 33キーワード）からの取得
-- 画像URLの取得（RSSの画像 → 記事ページのOGP画像。Googleニュース経由の記事は取得しない）
-- 重複除外、3日より古い記事の除外、評価もお気に入りもない90日超の記事の削除
+- ステップ2：収集バッチ
+  - `config/sources.yaml` の配信元（RSS 15件＋Googleニュース検索 33キーワード）からの取得
+  - 画像URLの取得（RSSの画像 → 記事ページのOGP画像。Googleニュース経由の記事は取得しない）
+  - 重複除外、3日より古い記事の除外、評価もお気に入りもない90日超の記事の削除
+- ステップ3：要約バッチ（Gemini 無料枠）
+  - 3日以内に取得した未要約の記事を20件ずつ送り、1行要約・分野・タグを保存
+  - 無料枠の上限（HTTP 429）に達したらその回は終了し、残りは次回に処理
+  - 使えないモデル名は飛ばして次の候補で実行
 
-AI要約・推薦・画面は次のステップで追加します。
+推薦・画面は次のステップで追加します。
 
 ## 構成
 
@@ -16,8 +21,10 @@ AI要約・推薦・画面は次のステップで追加します。
 schema.sql                     D1 のテーブル定義（7テーブル＋初期の重み）
 config/sources.yaml            配信元とGoogleニュース検索キーワード
 batch/collect.py               収集バッチ本体
+batch/summarize.py             要約バッチ本体（Gemini）
 batch/db.py                    D1（HTTP API）／ローカルSQLite への接続
 tests/test_collect.py          サンプルRSSでの動作確認（ネットワーク不要）
+tests/test_summarize.py        模擬のGemini応答での動作確認（ネットワーク不要）
 .github/workflows/collect.yml  毎日 6:00・18:00（日本時間）に収集
 ```
 
@@ -80,6 +87,18 @@ Cloudflare ダッシュボードの「My Profile → API Tokens → Create Token
 ```bash
 npx wrangler d1 execute news-curator --remote --command "SELECT category, COUNT(*) AS n, SUM(image_url IS NOT NULL) AS with_image FROM articles GROUP BY category"
 ```
+
+### 6. Gemini の APIキーを登録する（要約バッチ用）
+
+[Google AI Studio](https://aistudio.google.com/apikey) で APIキーを作り、Secrets に `GEMINI_API_KEY` として登録します。請求先アカウント（Set up billing）は紐づけないでください。紐づけなければ無料枠のまま、料金はかかりません。
+
+要約の結果は、Actions のログの「Geminiで要約・分類」に次のように出ます。
+
+```
+要約待ち ○○ 件 / 要約 ○○ 件 / 次回へ ○ 件 / リクエスト ○○ 回 / モデル gemini-…
+```
+
+「使えるモデルがありません」と出たら、AI Studio で無料枠のモデル名を確認し、「Settings → Secrets and variables → Actions → Variables」に `GEMINI_MODELS`（カンマ区切り、例 `gemini-3.5-flash-lite,gemini-3.8-flash`）を登録してください。
 
 ## 運用メモ
 

@@ -14,11 +14,15 @@ concurrency:
 jobs:
   collect:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 30
+    env:
+      CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
+      CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
+      CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -26,11 +30,17 @@ jobs:
       - run: pip install -r requirements.txt
 
       - name: ローカルテスト
-        run: python tests/test_collect.py
+        run: |
+          python tests/test_collect.py
+          python tests/test_summarize.py
 
       - name: RSSを収集してD1に保存
-        env:
-          CF_ACCOUNT_ID: ${{ secrets.CF_ACCOUNT_ID }}
-          CF_D1_DATABASE_ID: ${{ secrets.CF_D1_DATABASE_ID }}
-          CF_API_TOKEN: ${{ secrets.CF_API_TOKEN }}
         run: python batch/collect.py
+
+      - name: Geminiで要約・分類
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          # モデルを変えたいときは Settings → Secrets and variables → Actions → Variables に
+          # GEMINI_MODELS（例: gemini-3.5-flash-lite,gemini-3.8-flash）を登録する
+          GEMINI_MODELS: ${{ vars.GEMINI_MODELS }}
+        run: python batch/summarize.py
