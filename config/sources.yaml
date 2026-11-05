@@ -1,0 +1,77 @@
+# 配信元の一覧。ここを編集して push すると、次回の収集から反映されます。
+# category: it / keiba / stock / society / entame / trivia / lifehack / discovery
+# enabled: false にするとその配信元の取得を止めます（記事は残ります）。
+#
+# ※URLは初回実行のログで取得できたか確認してください。取得に失敗した配信元はログに一覧で出ます。
+
+feeds:
+  # --- IT ---
+  - { name: "Publickey", url: "https://www.publickey1.jp/atom.xml", category: it }
+  - { name: "ITmedia 総合", url: "https://rss.itmedia.co.jp/rss/2.0/itmedia_all.xml", category: it }
+  - { name: "Zenn トレンド", url: "https://zenn.dev/feed", category: it }
+  - { name: "Qiita 人気記事", url: "https://qiita.com/popular-items/feed", category: it }
+  - { name: "はてブ テクノロジー", url: "https://b.hatena.ne.jp/hotentry/it.rss", category: it }
+
+  # --- 株・マーケット ---
+  - { name: "はてブ 政治と経済", url: "https://b.hatena.ne.jp/hotentry/economics.rss", category: stock }
+
+  # --- 社会情勢 ---
+  - { name: "NHKニュース 主要", url: "https://www.nhk.or.jp/rss/news/cat0.xml", category: society }
+  - { name: "はてブ 世の中", url: "https://b.hatena.ne.jp/hotentry/social.rss", category: society }
+
+  # --- エンタメ ---
+  - { name: "はてブ エンタメ", url: "https://b.hatena.ne.jp/hotentry/entertainment.rss", category: entame }
+  - { name: "はてブ アニメとゲーム", url: "https://b.hatena.ne.jp/hotentry/game.rss", category: entame }
+
+  # --- 豆知識 ---
+  - { name: "はてブ 学び", url: "https://b.hatena.ne.jp/hotentry/knowledge.rss", category: trivia }
+  - { name: "GIGAZINE", url: "https://gigazine.net/news/rss_2.0/", category: trivia }
+
+  # --- ライフハック ---
+  - { name: "はてブ 暮らし", url: "https://b.hatena.ne.jp/hotentry/life.rss", category: lifehack }
+  - { name: "ライフハッカー・ジャパン", url: "https://www.lifehacker.jp/feed/index.xml", category: lifehack }
+
+  # --- 発見枠の候補 ---
+  - { name: "はてブ おもしろ", url: "https://b.hatena.ne.jp/hotentry/fun.rss", category: discovery }
+
+# Googleニュース検索RSS。キーワード1つにつき1つの配信元として登録されます。
+google_news:
+  it:
+    - "Google Apps Script"
+    - "Google Workspace"
+    - "Tableau"
+    - "BI データ可視化"
+    - "業務効率化 RPA"
+    - "kintone"
+    - "ノーコード"
+    - "生成AI"
+    - "Claude AI"
+    - "Gemini AI"
+    - "ChatGPT"
+    - "AIエージェント"
+    - "AI活用事例"
+    - "Cloudflare"
+    - "Python"
+    - "GitHub"
+    - "セキュリティ 情報漏えい"
+    - "介護DX"
+    - "中小企業DX"
+    - "フリーランス 個人事業主"
+    - "インボイス制度"
+    - "電子帳簿保存法"
+  keiba:
+    - "競馬"
+    - "JRA"
+  stock:
+    - "日経平均"
+    - "東証"
+    - "決算"
+  society:
+    - "名古屋"
+    - "愛知"
+  entame:
+    - "映画"
+    - "プロ野球"
+    - "メジャーリーグ"
+  discovery:
+    - "科学 研究"
