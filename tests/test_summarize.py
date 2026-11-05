@@ -175,6 +175,46 @@ def main():
     check(report["overloaded"] == summarize.MAX_OVERLOADED_BATCHES and report["skipped"] == 100
           and report.get("rate_limited"), "全モデルが混雑し続けたら3まとまりで打ち切り、残りは次回へ（エラー扱いにしない）")
 
+    # --- 安全フィルターで拒否されたら半分ずつに分けて送り直し、原因の1件だけ要約なしにする
+    db = new_db(20)
+    state = {"n": 0}
+
+    def fake_blocked(url, payload, api_key):
+        state["n"] += 1
+        items = json.loads(payload["contents"][0]["parts"][0]["text"].split("記事一覧（JSON）:\n")[1])
+        if any(it["id"] == 13 for it in items):
+            return FakeResponse(200, {"promptFeedback": {"blockReason": "PROHIBITED_CONTENT"}})
+        return gemini_ok([{"id": it["id"], "summary": "要約", "category": "it", "tags": []} for it in items])
+
+    summarize.http_post = fake_blocked
+    report = summarize.run(db, "key", ["m"], sleep=lambda s: None)
+    rows = {r["id"]: r for r in db.query("SELECT id, summary FROM articles")}
+    check(report["summarized"] == 19 and report["blocked"] == 1, "拒否されたまとまりを分割し、原因の1件以外の19件を要約")
+    check(rows[13]["summary"] == "", "原因の記事は要約なし（空文字）にして次回以降は送らない")
+    check(state["n"] <= 12, f"分割の送り直しは少ない回数で済む（{state['n']}回）")
+    report2 = summarize.run(db, "key", ["m"], sleep=lambda s: None)
+    check(report2["pending"] == 0, "次回は拒否された記事を対象にしない")
+
+    # --- 時間の上限を超えたら、残りは次回に回す（エラー扱いにしない）
+    db = new_db(100)
+    t = {"now": 0.0}
+
+    def fake_slow(url, payload, api_key):
+        t["now"] += 250  # 1リクエスト250秒かかったことにする
+        items = json.loads(payload["contents"][0]["parts"][0]["text"].split("記事一覧（JSON）:\n")[1])
+        return gemini_ok([{"id": it["id"], "summary": "要約", "category": "it", "tags": []} for it in items])
+
+    summarize.http_post = fake_slow
+    report = summarize.run(db, "key", ["m"], sleep=lambda s: None, clock=lambda: t["now"])
+    check(report["summarized"] == 60 and report["skipped"] == 40 and report.get("rate_limited"),
+          "10分を超えたら打ち切り、残り40件は次回へ")
+
+    # --- 1回の上限は200件
+    db = new_db(250)
+    summarize.http_post = fake_blocked
+    report = summarize.run(db, "key", ["m"], sleep=lambda s: None)
+    check(report["pending"] == 200, "1回に要約するのは200件まで")
+
     print(f"\n{'すべて成功' if not check.failed else f'{check.failed} 件失敗'}")
     sys.exit(1 if check.failed else 0)
 

@@ -14,6 +14,7 @@ import json
 import os
 import sys
 import time
+from collections import deque
 from pathlib import Path
 
 import requests
@@ -26,7 +27,9 @@ DEFAULT_MODELS = ["gemini-3.5-flash-lite", "gemini-3.1-flash-lite", "gemini-3.8-
 API_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 BATCH_SIZE = 20              # 1リクエストで送る記事数
-MAX_ARTICLES_PER_RUN = 600   # 1回の実行で要約する上限
+MAX_ARTICLES_PER_RUN = 200   # 1回の実行で要約する上限
+TIME_BUDGET = 600            # 要約にかける時間の上限（秒）。超えたら残りは次回
+SAVE_CHUNK = 10              # D1 へまとめて書き込む件数
 TARGET_DAYS = 3              # この日数以内に取得した記事だけを対象にする
 REQUEST_INTERVAL = 5.0       # リクエスト間隔（秒）。無料枠の1分あたり上限に収める
 RATE_LIMIT_WAIT = 60         # 429 のときに待つ秒数
@@ -86,6 +89,10 @@ class Overloaded(Exception):
     """Gemini 側の一時的な混雑（500 / 503）。"""
 
 
+class Blocked(Exception):
+    """安全フィルターで拒否された（どれかの記事が原因）。"""
+
+
 def http_post(url: str, payload: dict, api_key: str) -> requests.Response:
     """Gemini API を呼ぶ（テストでは差し替える）。"""
     return requests.post(url, json=payload, timeout=90,
@@ -117,6 +124,10 @@ def call_gemini(model: str, api_key: str, articles: list[dict]) -> list[dict]:
     if res.status_code != 200:
         raise RuntimeError(f"Gemini HTTP {res.status_code}: {res.text[:300]}")
     body = res.json()
+    feedback = body.get("promptFeedback") or {}
+    finish = ((body.get("candidates") or [{}])[0]).get("finishReason")
+    if feedback.get("blockReason") or finish in ("SAFETY", "PROHIBITED_CONTENT", "BLOCKLIST", "SPII"):
+        raise Blocked(feedback.get("blockReason") or finish)
     try:
         text = body["candidates"][0]["content"]["parts"][0]["text"]
         return json.loads(text)
@@ -145,22 +156,51 @@ def pending_articles(db: Database, limit: int) -> list[dict]:
         "ORDER BY fetched_at DESC, id DESC LIMIT ?", [limit])
 
 
+def save_results(db: Database, rows: list[tuple]) -> None:
+    """(summary, category, tags, id) の行を、まとめて UPDATE する（D1 への通信回数を減らす）。"""
+    for i in range(0, len(rows), SAVE_CHUNK):
+        chunk = rows[i:i + SAVE_CHUNK]
+        params: list = []
+        cases = []
+        for col_index, col in enumerate(("summary", "category", "tags")):
+            whens = " ".join("WHEN ? THEN ?" for _ in chunk)
+            cases.append(f"{col} = CASE id {whens} END")
+            for r in chunk:
+                params += [r[3], r[col_index]]
+        ids = [r[3] for r in chunk]
+        params += ids
+        db.query(f"UPDATE articles SET {', '.join(cases)} WHERE id IN ({','.join('?' * len(ids))})", params)
+
+
 def run(db: Database, api_key: str, models: list[str] | None = None,
-        sleep=time.sleep) -> dict:
+        sleep=time.sleep, clock=time.monotonic) -> dict:
     models = list(models or DEFAULT_MODELS)
     articles = pending_articles(db, MAX_ARTICLES_PER_RUN)
-    report = {"pending": len(articles), "summarized": 0, "skipped": 0, "requests": 0,
-              "model": None, "stopped": None, "overloaded": 0}
-    overloaded_in_row = 0
+    report = {"pending": len(articles), "summarized": 0, "skipped": 0, "blocked": 0,
+              "requests": 0, "model": None, "stopped": None, "overloaded": 0}
+    started = clock()
+    queue = deque(articles[i:i + BATCH_SIZE] for i in range(0, len(articles), BATCH_SIZE))
+    overloaded_in_row, first = 0, True
 
-    for i in range(0, len(articles), BATCH_SIZE):
-        batch = articles[i:i + BATCH_SIZE]
-        if i:
+    def stop(reason: str) -> dict:
+        report["skipped"] += sum(len(b) for b in queue)
+        report["stopped"] = reason
+        report["rate_limited"] = True  # エラー扱いにしない停止
+        return report
+
+    while queue:
+        if clock() - started > TIME_BUDGET:
+            return stop(f"{TIME_BUDGET // 60}分を超えたため終了（残りは次回）")
+        batch = queue.popleft()
+        if not first:
             sleep(REQUEST_INTERVAL)
+        first = False
         results, retries, overload_waits, models_tried = None, 0, 0, 1
         batch_overloaded = False
         while results is None:
             if not models:
+                queue.appendleft(batch)
+                report["skipped"] += sum(len(b) for b in queue)
                 report["stopped"] = "使えるモデルがありません（GEMINI_MODELS を確認してください）"
                 return report
             try:
@@ -170,6 +210,19 @@ def run(db: Database, api_key: str, models: list[str] | None = None,
             except ModelUnavailable as e:
                 print(f"モデルを切り替えます: {e}")
                 models.pop(0)
+            except Blocked as e:
+                if len(batch) > 1:
+                    # 原因の記事を絞り込むため、半分ずつに分けて送り直す
+                    half = len(batch) // 2
+                    queue.appendleft(batch[half:])
+                    queue.appendleft(batch[:half])
+                else:
+                    # 1件でも拒否される記事は要約なし（空文字）にして、次回以降は送らない
+                    print(f"安全フィルターで拒否されたため要約なしにします: id={batch[0]['id']} {e}")
+                    db.query("UPDATE articles SET summary = '' WHERE id = ?", [batch[0]["id"]])
+                    report["blocked"] += 1
+                results = []
+                batch = []
             except Overloaded as e:
                 if overload_waits < len(OVERLOAD_WAITS):
                     sleep(OVERLOAD_WAITS[overload_waits])
@@ -187,31 +240,28 @@ def run(db: Database, api_key: str, models: list[str] | None = None,
             except RateLimited as e:
                 retries += 1
                 if retries > MAX_RATE_LIMIT_RETRIES:
-                    report["stopped"] = f"無料枠の上限に達したため終了（残りは次回）: {str(e)[:120]}"
-                    report["rate_limited"] = True
-                    return report
+                    queue.appendleft(batch)
+                    return stop(f"無料枠の上限に達したため終了（残りは次回）: {str(e)[:120]}")
                 sleep(RATE_LIMIT_WAIT)
             except Exception as e:  # 応答の形式が崩れたなどは、このまとまりだけ飛ばす
                 print(f"要約に失敗したため次のまとまりへ進みます: {e}")
                 results = []
 
         by_id = {a["id"]: a for a in batch}
+        rows = []
         for item in results:
             a = by_id.pop(item.get("id"), None) if isinstance(item, dict) else None
             cleaned = clean_result(item, a["category"]) if a else None
-            if not cleaned:
-                continue
-            db.query("UPDATE articles SET summary = ?, category = ?, tags = ? WHERE id = ?",
-                     [*cleaned, a["id"]])
-            report["summarized"] += 1
+            if cleaned:
+                rows.append((*cleaned, a["id"]))
+        if rows:
+            save_results(db, rows)
+            report["summarized"] += len(rows)
         report["skipped"] += len(by_id)  # 応答に含まれなかった記事は次回に再挑戦
 
         overloaded_in_row = overloaded_in_row + 1 if batch_overloaded else 0
         if overloaded_in_row >= MAX_OVERLOADED_BATCHES:
-            report["skipped"] += len(articles) - (i + len(batch))
-            report["stopped"] = "Gemini が混雑しているため終了（残りは次回）"
-            report["rate_limited"] = True
-            return report
+            return stop("Gemini が混雑しているため終了（残りは次回）")
     return report
 
 
@@ -222,6 +272,7 @@ def main() -> int:
     models = [m.strip() for m in os.environ.get("GEMINI_MODELS", "").split(",") if m.strip()] or None
     report = run(connect(), api_key, models)
     print(f"要約待ち {report['pending']} 件 / 要約 {report['summarized']} 件 / 次回へ {report['skipped']} 件"
+          f" / 要約なし（拒否） {report['blocked']} 件"
           f" / リクエスト {report['requests']} 回 / モデル {report['model']}")
     if report["stopped"]:
         print(report["stopped"])
